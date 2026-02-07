@@ -1,0 +1,13 @@
+[Unit]
+Description=OpenClaw Gateway
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/openclaw gateway
+Restart=on-failure
+RestartSec=10
+Environment=HOME=%h
+
+[Install]
+WantedBy=default.target
