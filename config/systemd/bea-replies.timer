@@ -1,0 +1,10 @@
+[Unit]
+Description=Based EA Builds — check for replies every 30 min
+
+[Timer]
+OnCalendar=*:00,30
+RandomizedDelaySec=120
+Persistent=true
+
+[Install]
+WantedBy=timers.target

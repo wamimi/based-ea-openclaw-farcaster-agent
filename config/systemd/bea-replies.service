@@ -1,0 +1,10 @@
+[Unit]
+Description=Based EA Builds — reply to replies
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/.openclaw/workspace/openclaw-agent-basedea
+ExecStart=/usr/bin/node scripts/reply_to_replies.js
+Environment=HOME=%h
+TimeoutStartSec=120
