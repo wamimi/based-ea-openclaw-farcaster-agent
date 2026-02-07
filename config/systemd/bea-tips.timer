@@ -1,0 +1,9 @@
+[Unit]
+Description=Based EA Builds — daily tipping at 20:30 EAT
+
+[Timer]
+OnCalendar=20:30
+Persistent=true
+
+[Install]
+WantedBy=timers.target
