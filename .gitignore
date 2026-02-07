@@ -1,0 +1,9 @@
+node_modules/
+.state/
+.env
+*.env
+secrets/
+credentials.json
+farcaster-credentials.json
+farcaster-wallet.json
+.DS_Store
