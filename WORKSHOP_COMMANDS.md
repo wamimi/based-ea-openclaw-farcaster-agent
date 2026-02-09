@@ -39,7 +39,7 @@ ssh root@YOUR_VPS_IP
 ssh root@YOUR_VPS_IP
 ```
 
-> Replace `YOUR_VPS_IP` with the IP address from your VPS provider (e.g., `81.0.246.156`).
+> Replace `YOUR_VPS_IP` with the IP address from your VPS provider (e.g., `81.0`).
 
 ---
 
@@ -128,18 +128,22 @@ Still **on the VPS**, inside `~/.openclaw/workspace/farcaster-agent`:
 node src/auto-setup.js
 ```
 
-This generates a custody wallet. **Write down the private key and address!**
+This generates a custody wallet and saves it to `~/.openclaw/secrets/farcaster-wallet.json`. **Write down the wallet address!**
+
+> **Important**: `auto-setup.js` may try to swap USDC→ETH and bridge Base→Optimism. If the bridge reverts, don't worry — we'll do the rest manually. The wallet is still created and saved.
 
 ### Fund the wallet
 
-You need two things:
+Your wallet needs two things:
 
-1. **~$0.50 ETH on Optimism** — for FID registration (happens on OP Mainnet)
-2. **~$1+ USDC on Base** — for x402 API calls (every cast/read costs 0.001 USDC)
+| Chain | Asset | Amount | Purpose |
+|-------|-------|--------|---------|
+| **Optimism** | ETH | ~0.0003 ETH | FID registration + signer |
+| **Base** | USDC | ~$1+ | x402 API calls (0.001 USDC each) |
 
 Send funds to the wallet address that `auto-setup.js` printed.
 
-> **Tip**: Use a bridge like [bridge.base.org](https://bridge.base.org) or buy directly on an exchange and withdraw to the right chain.
+> **Tip**: Use [bridge.base.org](https://bridge.base.org) or withdraw from an exchange directly to the right chain. registration costs ~0.0002–0.0003 ETH on Optimism.
 
 ### Wait for funds to arrive, then verify
 
@@ -162,118 +166,140 @@ usdc.balanceOf('YOUR_WALLET_ADDRESS').then(b => console.log('USDC on Base:', eth
 
 ---
 
-## Part 6 — Register a Farcaster ID (FID)
+## Part 6 — Register FID, Add Signer, Save Credentials
 
-Still **on the VPS**, inside `~/.openclaw/workspace/farcaster-agent`:
+This is the most important part. Run these **one by one** on the VPS. Stop if any step errors.
 
 ```bash
-# Set your custody private key (the one from auto-setup.js)
-export CUSTODY_PK="0xYOUR_CUSTODY_PRIVATE_KEY_HERE"
+cd ~/.openclaw/workspace/farcaster-agent
 
-# Register your FID on Optimism
+# Load wallet private key from the saved wallet file
+export PRIVATE_KEY=$(node -p "require(process.env.HOME + '/.openclaw/secrets/farcaster-wallet.json').privateKey")
+```
+
+### Step 1 — Register FID (on Optimism)
+
+```bash
 node src/register-fid.js
 ```
 
-**Write down your FID number** (e.g., `2660927`). You'll need it everywhere.
+**Write down the FID number** from the output (e.g., `2660927`).
 
-> **Important**: You MUST use `export` — plain variables are invisible to Node.js child processes.
-
----
-
-## Part 7 — Add a Signer Key
-
-The signer is an Ed25519 key that lets your agent post without exposing the custody key.
+### Step 2 — Add signer (on Optimism)
 
 ```bash
-export FID=YOUR_FID_NUMBER
-export CUSTODY_PK="0xYOUR_CUSTODY_PRIVATE_KEY"
-
 node src/add-signer.js
 ```
 
-**Write down the signer private key** that gets printed.
+**Write down the signer private key** from the output.
+
+### Step 3 — Save credentials
+
+The manual flow does NOT auto-save credentials. Check first:
+
+```bash
+node src/credentials.js get
+```
+
+If it says "No credentials found", save them with this script:
+
+```bash
+read -s -p "Signer private key: " SIGNER_PK; echo
+read -p "FID: " FID
+export SIGNER_PK FID
+
+node - <<'NODE'
+const fs = require('fs');
+const path = require('path');
+
+const signer = process.env.SIGNER_PK;
+const fid = Number(process.env.FID);
+if (!signer || !fid) { console.error('Missing SIGNER_PK or FID'); process.exit(1); }
+
+const walletPath = path.join(process.env.HOME, '.openclaw', 'secrets', 'farcaster-wallet.json');
+const wallet = JSON.parse(fs.readFileSync(walletPath, 'utf8'));
+
+const data = {};
+data[String(fid)] = {
+  fid: String(fid),
+  custodyPrivateKey: wallet.privateKey,
+  signerPrivateKey: signer,
+  fname: null,
+  createdAt: new Date().toISOString()
+};
+data._active = String(fid);
+
+const out = path.join(process.env.HOME, '.openclaw', 'farcaster-credentials.json');
+fs.writeFileSync(out, JSON.stringify(data, null, 2), { mode: 0o600 });
+console.log('Credentials saved to', out);
+NODE
+
+unset SIGNER_PK FID
+```
+
+> **Critical**: The `export SIGNER_PK FID` line is what makes these visible to Node.js. Without `export`, the script will say "Missing SIGNER_PK or FID". This is the most common mistake.
+
+### Verify credentials saved
+
+```bash
+node src/credentials.js list
+node src/credentials.js get
+```
+
+You should see your FID and keys.
 
 ---
 
-## Part 8 — Save Credentials
-
-The farcaster-agent needs credentials in a specific JSON format:
-
-```bash
-cat > ~/.openclaw/farcaster-credentials.json << 'EOF'
-{
-  "YOUR_FID": {
-    "fid": "YOUR_FID",
-    "custodyPrivateKey": "0xYOUR_CUSTODY_PRIVATE_KEY",
-    "signerPrivateKey": "YOUR_SIGNER_PRIVATE_KEY",
-    "fname": null,
-    "createdAt": "2026-02-07T00:00:00.000Z"
-  },
-  "_active": "YOUR_FID"
-}
-EOF
-```
-
-Replace:
-- `YOUR_FID` (3 places) with your FID number
-- `YOUR_CUSTODY_PRIVATE_KEY` with your custody key (starts with `0x`)
-- `YOUR_SIGNER_PRIVATE_KEY` with your signer key
-
-Lock it down:
-
-```bash
-chmod 600 ~/.openclaw/farcaster-credentials.json
-```
-
-### Verify credentials
-
-```bash
-cat ~/.openclaw/farcaster-credentials.json | node -e "
-const d = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
-console.log('Active FID:', d._active);
-console.log('Has custody key:', !!d[d._active]?.custodyPrivateKey);
-console.log('Has signer key:', !!d[d._active]?.signerPrivateKey);
-"
-```
-
-Should show `true` for both keys.
-
----
-
-## Part 9 — Test Your First Cast
+## Part 7 — Test Your First Cast
 
 ```bash
 cd ~/.openclaw/workspace/farcaster-agent
 
-export PRIVATE_KEY="0xYOUR_CUSTODY_PRIVATE_KEY"
-export SIGNER_PRIVATE_KEY="YOUR_SIGNER_PRIVATE_KEY"
-export FID=YOUR_FID
+export PRIVATE_KEY=$(node -p "require(process.env.HOME + '/.openclaw/secrets/farcaster-wallet.json').privateKey")
+export SIGNER_PRIVATE_KEY=$(node -p "JSON.parse(require('fs').readFileSync(process.env.HOME+'/.openclaw/farcaster-credentials.json','utf8'))[JSON.parse(require('fs').readFileSync(process.env.HOME+'/.openclaw/farcaster-credentials.json','utf8'))._active].signerPrivateKey")
+export FID=$(node -p "JSON.parse(require('fs').readFileSync(process.env.HOME+'/.openclaw/farcaster-credentials.json','utf8'))._active")
 
-node src/post-cast.js "gm from my autonomous agent! 🤖"
+node src/post-cast.js "gm from my autonomous agent!"
 ```
 
-Check Warpcast — your cast should appear! Each cast costs 0.001 USDC via x402.
+If you see `Submitted successfully` and `Cast verified on network!` — you're live on Farcaster! Each cast costs 0.001 USDC via x402.
 
 ---
 
-## Part 10 — Set Your Agent's Profile
+## Part 8 — Set Your Agent's Profile
 
 ```bash
 cd ~/.openclaw/workspace/farcaster-agent
 
-export PRIVATE_KEY="0xYOUR_CUSTODY_PRIVATE_KEY"
-export SIGNER_PRIVATE_KEY="YOUR_SIGNER_PRIVATE_KEY"
-export FID=YOUR_FID
+node - <<'NODE'
+const { setupFullProfile, loadCredentials } = require('./src');
 
-node src/set-profile.js \
-  --username youragentname \
-  --display "Your Agent Display Name" \
-  --bio "Your agent description. Built on Base with OpenClaw."
+(async () => {
+  const creds = loadCredentials();
+  await setupFullProfile({
+    privateKey: creds.custodyPrivateKey,
+    signerPrivateKey: creds.signerPrivateKey,
+    fid: Number(creds.fid),
+    fname: 'youragentname',
+    displayName: 'Your Agent Display Name',
+    bio: 'Your agent bio. Built on Base with OpenClaw.',
+    pfpUrl: 'https://api.dicebear.com/7.x/bottts/png?seed=youragentname'
+  });
+  console.log('Profile updated');
+})().catch(err => {
+  console.error('Profile update failed:', err?.message || err);
+  process.exit(1);
+});
+NODE
 ```
+
+Replace `youragentname` (lowercase, 1-16 chars), display name, bio, and PFP URL with your own values.
+
+> **Note**: Farcaster usernames can only be changed once every 28 days. Pick one you're happy with.
 
 ---
 
-## Part 11 — Define Your Agent's Personality
+## Part 9 — Define Your Agent's Personality
 
 ### SOUL.md — who your agent IS
 
@@ -326,7 +352,7 @@ EOF
 
 ---
 
-## Part 12 — Set Up API Keys
+## Part 10 — Set Up API Keys
 
 ### OpenRouter (for LLM — generates your agent's posts and replies)
 
@@ -360,7 +386,7 @@ console.log(d.choices?.[0]?.message?.content || 'ERROR: ' + JSON.stringify(d));
 
 ---
 
-## Part 13 — Create the Daily Prompt Script
+## Part 11 — Create the Daily Prompt Script
 
 This script posts a build-streak prompt every hour (with probability and cooldown logic).
 
@@ -378,7 +404,7 @@ The `daily_prompt.js` script is large — **do NOT paste it via heredoc** (it ge
 scp /path/to/your/daily_prompt.js root@YOUR_VPS_IP:~/.openclaw/workspace/farcaster-agent/scripts/daily_prompt.js
 ```
 
-> **Workshop attendees**: Your instructor will share the `daily_prompt.js` file. Save it to your local machine, then `scp` it to your VPS.
+> **I will share the `daily_prompt.js` file. Save it to your local machine, then `scp` it to your VPS.
 
 ### Test it
 
@@ -399,7 +425,7 @@ node scripts/daily_prompt.js --force
 
 ---
 
-## Part 14 — Create the Reply Script
+## Part 12 — Create the Reply Script
 
 The reply script checks for new replies to your agent's casts and responds. It has:
 - Multi-cast checking (checks ALL recent posts, not just the latest)
@@ -422,7 +448,7 @@ node scripts/reply_to_replies.js --dry-run
 
 ---
 
-## Part 15 — Set Up Systemd Timers (Automation)
+## Part 13 — Set Up Systemd Timers (Automation)
 
 This is what makes the agent truly autonomous — it posts and replies on a schedule, even after you disconnect from SSH.
 
@@ -551,7 +577,7 @@ journalctl --user -u openclaw-gateway.service --since today -f
 
 ---
 
-## Part 16 — Access the Dashboard (from your local machine)
+## Part 14 — Access the Dashboard (from your local machine)
 
 The OpenClaw dashboard runs on port 18789 on the VPS, but it's only accessible locally. Use an SSH tunnel:
 
@@ -580,7 +606,7 @@ The dashboard lets you:
 
 ---
 
-## Part 17 — Configure the Gateway LLM
+## Part 15 — Configure the Gateway LLM
 
 The gateway defaults to an expensive model. Switch to a fast, cheap one:
 
@@ -859,14 +885,14 @@ The free plan allows 1 request per second. The `discovery_job.js` script has a 1
 8.  git clone .../farcaster-agent.git  # clone skill
 9.  cd farcaster-agent && npm install  # install deps
 10. node src/auto-setup.js             # create wallet
-11. [FUND WALLET — ETH on OP + USDC on Base]
-12. export CUSTODY_PK="0x..."
+11. [FUND WALLET — ~0.0003 ETH on OP + ~$1 USDC on Base]
+12. export PRIVATE_KEY=$(node -p ...)  # load wallet key
 13. node src/register-fid.js           # get FID
-14. export FID=YOUR_FID
-15. node src/add-signer.js             # get signer key
-16. [CREATE credentials JSON]
+14. node src/add-signer.js             # get signer key
+15. [SAVE credentials via script]      # export SIGNER_PK FID
+16. node src/credentials.js get        # verify saved
 17. node src/post-cast.js "gm!"        # test cast
-18. node src/set-profile.js ...        # set profile
+18. [SET PROFILE via setupFullProfile] # username, bio, pfp
 19. [CREATE SOUL.md + AGENTS.md]
 20. [CREATE prompt.env with OpenRouter key]
 21. [SCP scripts from local machine]
