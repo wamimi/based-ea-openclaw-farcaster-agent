@@ -164,70 +164,156 @@ This installs key dependencies: `ethers`, `@farcaster/hub-nodejs`, and the x402 
 
 ## Step 3 — Farcaster Account (Manual Flow)
 
-> **Lesson learned**: The `auto-setup.js` script tries to swap USDC→ETH and bridge Base→Optimism. The bridge reverted for me. The **manual flow is more reliable**.
+> **Lesson learned**: The `auto-setup.js` script tries to swap USDC→ETH and bridge Base→Optimism. The bridge reverted for us. The **manual flow is more reliable**.
 
 ### 3a. Create a wallet
 
 ```bash
 cd ~/.openclaw/workspace/farcaster-agent
-node src/auto-setup.js   # or create manually
+node src/auto-setup.js
 ```
 
-This generates a custody wallet. Fund it with ~$0.50 ETH on **Optimism** (FID registration happens on OP Mainnet) and some USDC on **Base** (for x402 payments).
+This generates a custody wallet and saves it to `~/.openclaw/secrets/farcaster-wallet.json`. **Write down the wallet address** — you'll need to fund it.
 
-### 3b. Register a Farcaster ID (FID)
+### 3b. Fund the wallet
 
-```bash
-export CUSTODY_PK="0xYOUR_CUSTODY_PRIVATE_KEY"
-node src/register-fid.js
-```
+Your wallet needs two things:
 
-Note down your FID (ours: `2660927`).
+| Chain | Asset | Amount | Purpose |
+|-------|-------|--------|---------|
+| **Optimism** | ETH | ~0.0003 ETH | FID registration + signer (happens on OP Mainnet) |
+| **Base** | USDC | ~$1+ | x402 API calls (0.001 USDC each) + tipping |
 
-### 3c. Add a signer
+Send funds to the wallet address from Step 3a. You can bridge from mainnet via [bridge.base.org](https://bridge.base.org) or withdraw from an exchange directly to the right chain.
 
-```bash
-export FID=2660927
-export CUSTODY_PK="0x..."
-node src/add-signer.js
-```
+> **Lesson learned**: You do NOT need $4+ of ETH. Registration + signer costs ~0.0002–0.0003 ETH on Optimism.
 
-> **Lesson learned**: You must `export` shell variables before running Node scripts. Plain `read` variables are invisible to child processes.
+### 3c. Register FID, add signer, save credentials
 
-### 3d. Save credentials
-
-The manual flow doesn't auto-save. Create the credentials file:
-
-```bash
-cat > ~/.openclaw/farcaster-credentials.json << 'EOF'
-{
-  "YOUR_FID": {
-    "fid": "YOUR_FID",
-    "custodyPrivateKey": "0x...",
-    "signerPrivateKey": "...",
-    "fname": null,
-    "createdAt": "2026-02-04T00:00:00.000Z"
-  },
-  "_active": "YOUR_FID"
-}
-EOF
-chmod 600 ~/.openclaw/farcaster-credentials.json
-```
-
-> **Lesson learned**: The nested format with `_active` pointer is important. `loadCredentials()` reads `data[data._active]` to find the active account.
-
-### 3e. Test a post
+Run these one by one on the VPS. Stop if any step errors.
 
 ```bash
 cd ~/.openclaw/workspace/farcaster-agent
-PRIVATE_KEY="0x..." SIGNER_PRIVATE_KEY="..." FID=2660927 node src/post-cast.js "gm from my autonomous agent!"
+
+# Load wallet private key from the saved wallet file
+export PRIVATE_KEY=$(node -p "require(process.env.HOME + '/.openclaw/secrets/farcaster-wallet.json').privateKey")
 ```
 
-### 3f. Set profile
+**Step 1 — Register FID (on Optimism):**
 
 ```bash
-node src/set-profile.js --username YOUR_USERNAME --display "Your Agent Name" --bio "Your agent description"
+node src/register-fid.js
 ```
+
+Write down the FID number from the output (e.g., `2660927`).
+
+**Step 2 — Add signer (on Optimism):**
+
+```bash
+node src/add-signer.js
+```
+
+Write down the signer public key and **signer private key** from the output.
+
+**Step 3 — Save credentials:**
+
+The manual flow does NOT auto-save. You need to save them:
+
+```bash
+node src/credentials.js get
+```
+
+If it says "No credentials found", save them manually:
+
+```bash
+read -s -p "Signer private key: " SIGNER_PK; echo
+read -p "FID: " FID
+export SIGNER_PK FID
+
+node - <<'NODE'
+const fs = require('fs');
+const path = require('path');
+
+const signer = process.env.SIGNER_PK;
+const fid = Number(process.env.FID);
+if (!signer || !fid) { console.error('Missing SIGNER_PK or FID'); process.exit(1); }
+
+const walletPath = path.join(process.env.HOME, '.openclaw', 'secrets', 'farcaster-wallet.json');
+const wallet = JSON.parse(fs.readFileSync(walletPath, 'utf8'));
+
+const data = {};
+data[String(fid)] = {
+  fid: String(fid),
+  custodyPrivateKey: wallet.privateKey,
+  signerPrivateKey: signer,
+  fname: null,
+  createdAt: new Date().toISOString()
+};
+data._active = String(fid);
+
+const out = path.join(process.env.HOME, '.openclaw', 'farcaster-credentials.json');
+fs.writeFileSync(out, JSON.stringify(data, null, 2), { mode: 0o600 });
+console.log('Credentials saved to', out);
+NODE
+
+unset SIGNER_PK FID
+```
+
+> **Lesson learned**: You MUST `export` the variables — `read` creates local shell variables that are invisible to Node.js. The `export SIGNER_PK FID` line is critical.
+
+**Verify credentials saved:**
+
+```bash
+node src/credentials.js list
+node src/credentials.js get
+```
+
+> **Lesson learned**: The credentials file uses a nested format with an `_active` pointer. `loadCredentials()` reads `data[data._active]` to find the active account. The file lives at `~/.openclaw/farcaster-credentials.json`.
+
+### 3d. Test a post
+
+```bash
+cd ~/.openclaw/workspace/farcaster-agent
+
+export PRIVATE_KEY=$(node -p "require(process.env.HOME + '/.openclaw/secrets/farcaster-wallet.json').privateKey")
+export SIGNER_PRIVATE_KEY=$(node -p "JSON.parse(require('fs').readFileSync(process.env.HOME + '/.openclaw/farcaster-credentials.json','utf8'))[JSON.parse(require('fs').readFileSync(process.env.HOME + '/.openclaw/farcaster-credentials.json','utf8'))._active].signerPrivateKey")
+export FID=$(node -p "JSON.parse(require('fs').readFileSync(process.env.HOME + '/.openclaw/farcaster-credentials.json','utf8'))._active")
+
+node src/post-cast.js "gm from my autonomous agent!"
+```
+
+If you see `Submitted successfully` and `Cast verified on network!` — you're live on Farcaster.
+
+### 3e. Set profile
+
+```bash
+cd ~/.openclaw/workspace/farcaster-agent
+
+node - <<'NODE'
+const { setupFullProfile, loadCredentials } = require('./src');
+
+(async () => {
+  const creds = loadCredentials();
+  await setupFullProfile({
+    privateKey: creds.custodyPrivateKey,
+    signerPrivateKey: creds.signerPrivateKey,
+    fid: Number(creds.fid),
+    fname: 'YOUR_USERNAME',
+    displayName: 'Your Agent Display Name',
+    bio: 'Your agent bio goes here.',
+    pfpUrl: 'https://example.com/your-avatar.png'
+  });
+  console.log('Profile updated');
+})().catch(err => {
+  console.error('Profile update failed:', err?.message || err);
+  process.exit(1);
+});
+NODE
+```
+
+Replace `YOUR_USERNAME` (lowercase, 1-16 chars, hyphens OK), display name, bio, and PFP URL with your own values.
+
+> **Note**: Farcaster usernames can only be changed once every 28 days. Pick one you're happy with.
 
 ## Step 4 — Agent Personality (SOUL.md & AGENTS.md)
 
